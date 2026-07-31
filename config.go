@@ -26,6 +26,9 @@ func validateConfig(config *Config) error {
 	if config == nil {
 		return nil
 	}
+	if config.ACKPolicy > ACKPolicyNeqo {
+		return fmt.Errorf("invalid ACK policy: %d", config.ACKPolicy)
+	}
 	const maxStreams = 1 << 60
 	if config.MaxIncomingStreams > maxStreams {
 		config.MaxIncomingStreams = maxStreams
@@ -124,6 +127,7 @@ func populateConfig(config *Config) *Config {
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
+		ACKPolicy:                        config.ACKPolicy,
 		Tracer:                           config.Tracer,
 	}
 }

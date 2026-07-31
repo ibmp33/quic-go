@@ -18,10 +18,14 @@ type ReceivedPacketHandler struct {
 }
 
 func NewReceivedPacketHandler(logger utils.Logger) *ReceivedPacketHandler {
+	return NewReceivedPacketHandlerWithPolicy(logger, ACKPolicyDefault, nil)
+}
+
+func NewReceivedPacketHandlerWithPolicy(logger utils.Logger, policy ACKPolicy, rttStats *utils.RTTStats) *ReceivedPacketHandler {
 	return &ReceivedPacketHandler{
 		initialPackets:   newReceivedPacketTracker(),
 		handshakePackets: newReceivedPacketTracker(),
-		appDataPackets:   *newAppDataReceivedPacketTracker(logger),
+		appDataPackets:   *newAppDataReceivedPacketTrackerWithPolicy(logger, policy, rttStats),
 		lowest1RTTPacket: protocol.InvalidPacketNumber,
 	}
 }

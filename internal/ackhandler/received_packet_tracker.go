@@ -12,6 +12,24 @@ import (
 
 const reorderingThreshold = 1
 
+type ACKPolicy uint8
+
+const (
+	ACKPolicyDefault ACKPolicy = iota
+	ACKPolicyQUICHE
+	ACKPolicyNeqo
+)
+
+const (
+	quicheInitialPacketsBeforeACK   = 2
+	quicheDecimatedPacketsBeforeACK = 10
+	quicheDecimationThreshold       = 100
+	quicheACKDelayRatio             = 0.25
+	quicheAlarmGranularity          = time.Millisecond
+	neqoPacketsBeforeACK            = 2
+	neqoMaxACKDelay                 = 20 * time.Millisecond
+)
+
 // The receivedPacketTracker tracks packets for the Initial and Handshake packet number space.
 // Every received packet is acknowledged immediately.
 type receivedPacketTracker struct {
@@ -75,7 +93,7 @@ func (h *receivedPacketTracker) IsPotentiallyDuplicate(pn protocol.PacketNumber)
 	return h.packetHistory.IsPotentiallyDuplicate(pn)
 }
 
-// number of ack-eliciting packets received before sending an ACK
+// Number of ack-eliciting packets received before sending an ACK.
 const packetsBeforeAck = 2
 
 // The appDataReceivedPacketTracker tracks packets received in the Application Data packet number space.
@@ -85,23 +103,38 @@ type appDataReceivedPacketTracker struct {
 
 	largestObservedRcvdTime monotime.Time
 
-	largestObserved protocol.PacketNumber
-	ignoreBelow     protocol.PacketNumber
+	largestObserved    protocol.PacketNumber
+	hasLargestObserved bool
+	firstObserved      protocol.PacketNumber
+	hasFirstObserved   bool
+	ignoreBelow        protocol.PacketNumber
 
 	maxAckDelay time.Duration
 	ackQueued   bool // true if we need send a new ACK
 
 	ackElicitingPacketsReceivedSinceLastAck int
 	ackAlarm                                monotime.Time
+	lastAckTime                             monotime.Time
 
-	logger utils.Logger
+	policy   ACKPolicy
+	rttStats *utils.RTTStats
+	logger   utils.Logger
 }
 
 func newAppDataReceivedPacketTracker(logger utils.Logger) *appDataReceivedPacketTracker {
+	return newAppDataReceivedPacketTrackerWithPolicy(logger, ACKPolicyDefault, nil)
+}
+
+func newAppDataReceivedPacketTrackerWithPolicy(logger utils.Logger, policy ACKPolicy, rttStats *utils.RTTStats) *appDataReceivedPacketTracker {
 	h := &appDataReceivedPacketTracker{
 		receivedPacketTracker: *newReceivedPacketTracker(),
 		maxAckDelay:           protocol.MaxAckDelay,
+		policy:                policy,
+		rttStats:              rttStats,
 		logger:                logger,
+	}
+	if policy == ACKPolicyNeqo {
+		h.maxAckDelay = neqoMaxACKDelay
 	}
 	return h
 }
@@ -110,27 +143,78 @@ func (h *appDataReceivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, 
 	if err := h.receivedPacketTracker.ReceivedPacket(pn, ecn, ackEliciting); err != nil {
 		return err
 	}
-	if pn >= h.largestObserved {
+	if !h.hasFirstObserved {
+		h.firstObserved = pn
+		h.hasFirstObserved = true
+	}
+	outOfOrder := h.hasLargestObserved && pn < h.largestObserved
+	if !h.hasLargestObserved || pn >= h.largestObserved {
 		h.largestObserved = pn
 		h.largestObservedRcvdTime = rcvTime
+		h.hasLargestObserved = true
 	}
 	if !ackEliciting {
 		return nil
 	}
 	h.ackElicitingPacketsReceivedSinceLastAck++
 	isMissing := h.isMissing(pn)
-	if !h.ackQueued && h.shouldQueueACK(pn, ecn, isMissing) {
+	if !h.ackQueued && h.shouldQueueACK(pn, ecn, isMissing, outOfOrder) {
 		h.ackQueued = true
 		h.ackAlarm = 0 // cancel the ack alarm
 	}
 	if !h.ackQueued {
 		// No ACK queued, but we'll need to acknowledge the packet after max_ack_delay.
-		h.ackAlarm = rcvTime.Add(h.maxAckDelay)
+		deadline := rcvTime.Add(h.ackDelay(pn))
+		if h.policy == ACKPolicyNeqo && !h.lastAckTime.IsZero() && h.rttStats != nil {
+			rttDeadline := h.lastAckTime.Add(h.rttStats.SmoothedRTT())
+			if rttDeadline.Before(deadline) {
+				deadline = rttDeadline
+			}
+		}
+		if !deadline.After(rcvTime) {
+			h.ackQueued = true
+			h.ackAlarm = 0
+			return nil
+		}
+		if h.policy == ACKPolicyDefault || h.ackAlarm.IsZero() || deadline.Before(h.ackAlarm) {
+			h.ackAlarm = deadline
+		}
 		if h.logger.Debug() {
-			h.logger.Debugf("\tSetting ACK timer to max ack delay: %s", h.maxAckDelay)
+			h.logger.Debugf("\tSetting ACK timer for policy %d to %s.", h.policy, h.ackAlarm)
 		}
 	}
 	return nil
+}
+
+func (h *appDataReceivedPacketTracker) packetsBeforeACK(pn protocol.PacketNumber) int {
+	switch h.policy {
+	case ACKPolicyQUICHE:
+		if h.hasFirstObserved && pn >= h.firstObserved+quicheDecimationThreshold {
+			return quicheDecimatedPacketsBeforeACK
+		}
+		return quicheInitialPacketsBeforeACK
+	case ACKPolicyNeqo:
+		return neqoPacketsBeforeACK
+	default:
+		return packetsBeforeAck
+	}
+}
+
+func (h *appDataReceivedPacketTracker) ackDelay(pn protocol.PacketNumber) time.Duration {
+	switch h.policy {
+	case ACKPolicyQUICHE:
+		if !h.hasFirstObserved || pn < h.firstObserved+quicheDecimationThreshold || h.rttStats == nil {
+			return h.maxAckDelay
+		}
+		return max(
+			quicheAlarmGranularity,
+			min(h.maxAckDelay, time.Duration(float64(h.rttStats.MinRTT())*quicheACKDelayRatio)),
+		)
+	case ACKPolicyNeqo:
+		return neqoMaxACKDelay
+	default:
+		return h.maxAckDelay
+	}
 }
 
 // IgnoreBelow sets a lower limit for acknowledging packets.
@@ -172,21 +256,21 @@ func (h *appDataReceivedPacketTracker) hasNewMissingPackets() bool {
 	return highestMissing > h.lastAck.LargestAcked()-reorderingThreshold
 }
 
-func (h *appDataReceivedPacketTracker) shouldQueueACK(pn protocol.PacketNumber, ecn protocol.ECN, wasMissing bool) bool {
+func (h *appDataReceivedPacketTracker) shouldQueueACK(pn protocol.PacketNumber, ecn protocol.ECN, wasMissing, outOfOrder bool) bool {
 	// Send an ACK if this packet was reported missing in an ACK sent before.
 	// Ack decimation with reordering relies on the timer to send an ACK, but if
 	// missing packets we reported in the previous ACK, send an ACK immediately.
-	if wasMissing {
+	if wasMissing || (h.policy == ACKPolicyNeqo && outOfOrder) {
 		if h.logger.Debug() {
-			h.logger.Debugf("\tQueueing ACK because packet %d was missing before.", pn)
+			h.logger.Debugf("\tQueueing ACK because packet %d was missing or reordered.", pn)
 		}
 		return true
 	}
 
-	// send an ACK every 2 ack-eliciting packets
-	if h.ackElicitingPacketsReceivedSinceLastAck >= packetsBeforeAck {
+	threshold := h.packetsBeforeACK(pn)
+	if h.ackElicitingPacketsReceivedSinceLastAck >= threshold {
 		if h.logger.Debug() {
-			h.logger.Debugf("\tQueueing ACK because packet %d packets were received after the last ACK (using initial threshold: %d).", h.ackElicitingPacketsReceivedSinceLastAck, packetsBeforeAck)
+			h.logger.Debugf("\tQueueing ACK because %d packets were received after the last ACK (threshold: %d).", h.ackElicitingPacketsReceivedSinceLastAck, threshold)
 		}
 		return true
 	}
@@ -198,7 +282,7 @@ func (h *appDataReceivedPacketTracker) shouldQueueACK(pn protocol.PacketNumber, 
 	}
 
 	// queue an ACK if the packet was ECN-CE marked
-	if ecn == protocol.ECNCE {
+	if ecn == protocol.ECNCE && h.policy != ACKPolicyNeqo {
 		h.logger.Debugf("\tQueuing ACK because the packet was ECN-CE marked.")
 		return true
 	}
@@ -222,6 +306,7 @@ func (h *appDataReceivedPacketTracker) GetAckFrame(now monotime.Time, onlyIfQueu
 	h.ackQueued = false
 	h.ackAlarm = 0
 	h.ackElicitingPacketsReceivedSinceLastAck = 0
+	h.lastAckTime = now
 	return ack
 }
 

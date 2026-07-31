@@ -84,6 +84,61 @@ func TestAppDataReceivedPacketTrackerAckEverySecondPacket(t *testing.T) {
 	}
 }
 
+func TestAppDataReceivedPacketTrackerQUICHEPolicy(t *testing.T) {
+	rttStats := utils.NewRTTStats()
+	rttStats.UpdateRTT(8*time.Millisecond, 0)
+	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyQUICHE, rttStats)
+	now := monotime.Now()
+
+	for p := protocol.PacketNumber(0); p < quicheDecimationThreshold; p++ {
+		require.NoError(t, tr.ReceivedPacket(p, protocol.ECNNon, now, true))
+		if p%2 == 0 {
+			require.Nil(t, tr.GetAckFrame(now, true))
+		} else {
+			require.NotNil(t, tr.GetAckFrame(now, true))
+		}
+	}
+
+	for p := protocol.PacketNumber(100); p < 109; p++ {
+		rcvTime := now.Add(time.Duration(p-99) * time.Microsecond)
+		require.NoError(t, tr.ReceivedPacket(p, protocol.ECNNon, rcvTime, true))
+		require.Nil(t, tr.GetAckFrame(rcvTime, true))
+	}
+	require.Equal(t, now.Add(time.Microsecond).Add(2*time.Millisecond), tr.GetAlarmTimeout())
+
+	require.NoError(t, tr.ReceivedPacket(109, protocol.ECNNon, now.Add(10*time.Microsecond), true))
+	require.NotNil(t, tr.GetAckFrame(now.Add(10*time.Microsecond), true))
+}
+
+func TestAppDataReceivedPacketTrackerNeqoPolicy(t *testing.T) {
+	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyNeqo, nil)
+	now := monotime.Now()
+
+	require.NoError(t, tr.ReceivedPacket(1, protocol.ECNNon, now, true))
+	require.Equal(t, now.Add(neqoMaxACKDelay), tr.GetAlarmTimeout())
+	require.Nil(t, tr.GetAckFrame(now, true))
+
+	require.NoError(t, tr.ReceivedPacket(2, protocol.ECNNon, now, true))
+	require.NotNil(t, tr.GetAckFrame(now, true))
+
+	require.NoError(t, tr.ReceivedPacket(4, protocol.ECNNon, now, true))
+	require.NotNil(t, tr.GetAckFrame(now, true))
+	require.NoError(t, tr.ReceivedPacket(3, protocol.ECNNon, now, true))
+	require.NotNil(t, tr.GetAckFrame(now, true))
+}
+
+func TestAppDataReceivedPacketTrackerNeqoImmediatelyACKsReordering(t *testing.T) {
+	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyNeqo, nil)
+	now := monotime.Now()
+
+	// Establish the largest observed packet without incrementing the
+	// ACK-eliciting packet counter. This isolates the reordering trigger from
+	// the every-second-packet trigger.
+	require.NoError(t, tr.ReceivedPacket(4, protocol.ECNNon, now, false))
+	require.NoError(t, tr.ReceivedPacket(3, protocol.ECNNon, now, true))
+	require.NotNil(t, tr.GetAckFrame(now, true))
+}
+
 func TestAppDataReceivedPacketTrackerAlarmTimeout(t *testing.T) {
 	tr := newAppDataReceivedPacketTracker(utils.DefaultLogger)
 

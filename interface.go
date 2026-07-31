@@ -98,6 +98,20 @@ type ConnectionIDGenerator interface {
 	ConnectionIDLen() int
 }
 
+// ACKPolicy selects the receiver-side ACK generation policy for application data.
+// It is intended for controlled experiments. Initial and Handshake packets are
+// always acknowledged immediately.
+type ACKPolicy uint8
+
+const (
+	// ACKPolicyDefault uses quic-go's default ACK generation policy.
+	ACKPolicyDefault ACKPolicy = iota
+	// ACKPolicyQUICHE approximates QUICHE's delayed ACK and ACK decimation policy.
+	ACKPolicyQUICHE
+	// ACKPolicyNeqo approximates Neqo's delayed ACK policy.
+	ACKPolicyNeqo
+)
+
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
 	// GetConfigForClient is called for incoming connections.
@@ -181,6 +195,10 @@ type Config struct {
 	// Enable QUIC Stream Resets with Partial Delivery.
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09.
 	EnableStreamResetPartialDelivery bool
+
+	// ACKPolicy selects the receiver-side ACK policy for application data.
+	// The zero value uses quic-go's default behavior.
+	ACKPolicy ACKPolicy
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
 }
