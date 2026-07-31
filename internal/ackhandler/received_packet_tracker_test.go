@@ -90,7 +90,7 @@ func TestAppDataReceivedPacketTrackerQUICHEPolicy(t *testing.T) {
 	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyQUICHE, rttStats)
 	now := monotime.Now()
 
-	for p := protocol.PacketNumber(0); p < quicheDecimationThreshold; p++ {
+	for p := range protocol.PacketNumber(quicheDecimationThreshold) {
 		require.NoError(t, tr.ReceivedPacket(p, protocol.ECNNon, now, true))
 		if p%2 == 0 {
 			require.Nil(t, tr.GetAckFrame(now, true))

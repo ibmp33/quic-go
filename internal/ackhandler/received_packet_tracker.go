@@ -195,8 +195,10 @@ func (h *appDataReceivedPacketTracker) packetsBeforeACK(pn protocol.PacketNumber
 		return quicheInitialPacketsBeforeACK
 	case ACKPolicyNeqo:
 		return neqoPacketsBeforeACK
-	default:
+	case ACKPolicyDefault:
 		return packetsBeforeAck
+	default:
+		panic(fmt.Sprintf("invalid ACK policy: %d", h.policy))
 	}
 }
 
@@ -212,8 +214,10 @@ func (h *appDataReceivedPacketTracker) ackDelay(pn protocol.PacketNumber) time.D
 		)
 	case ACKPolicyNeqo:
 		return neqoMaxACKDelay
-	default:
+	case ACKPolicyDefault:
 		return h.maxAckDelay
+	default:
+		panic(fmt.Sprintf("invalid ACK policy: %d", h.policy))
 	}
 }
 
