@@ -104,12 +104,23 @@ type ConnectionIDGenerator interface {
 type ACKPolicy uint8
 
 const (
-	// ACKPolicyDefault uses quic-go's default ACK generation policy.
-	ACKPolicyDefault ACKPolicy = iota
-	// ACKPolicyQUICHE approximates QUICHE's delayed ACK and ACK decimation policy.
-	ACKPolicyQUICHE
+	// ACKPolicyFixed2 uses an ACK threshold of 2 ack-eliciting application data packets.
+	ACKPolicyFixed2 ACKPolicy = iota
+	// ACKPolicyFixed10 uses an ACK threshold of 10 ack-eliciting application data packets.
+	// Apart from the threshold, it uses the same ACK state machine as ACKPolicyFixed2.
+	ACKPolicyFixed10
 	// ACKPolicyNeqo approximates Neqo's delayed ACK policy.
 	ACKPolicyNeqo
+	// ACKPolicyChromium selects the experiment's Chromium-labeled ACK decimation
+	// profile: ACK2 initially, then ACK10 with an RTT-derived delayed-ACK timer.
+	ACKPolicyChromium
+
+	// ACKPolicyDefault is kept as an alias for quic-go's default ACK2 policy.
+	ACKPolicyDefault = ACKPolicyFixed2
+	// ACKPolicyQUICHE is kept as a source-compatible alias for the policy that was
+	// previously exposed under this name. New experiment code should use
+	// ACKPolicyChromium.
+	ACKPolicyQUICHE = ACKPolicyChromium
 )
 
 // Config contains all configuration data needed for a QUIC server or client.

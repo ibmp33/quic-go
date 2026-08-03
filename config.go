@@ -26,7 +26,7 @@ func validateConfig(config *Config) error {
 	if config == nil {
 		return nil
 	}
-	if config.ACKPolicy > ACKPolicyNeqo {
+	if config.ACKPolicy > ACKPolicyChromium {
 		return fmt.Errorf("invalid ACK policy: %d", config.ACKPolicy)
 	}
 	const maxStreams = 1 << 60

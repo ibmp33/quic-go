@@ -15,19 +15,28 @@ const reorderingThreshold = 1
 type ACKPolicy uint8
 
 const (
-	ACKPolicyDefault ACKPolicy = iota
-	ACKPolicyQUICHE
+	ACKPolicyFixed2 ACKPolicy = iota
+	ACKPolicyFixed10
 	ACKPolicyNeqo
+	ACKPolicyChromium
+
+	ACKPolicyDefault = ACKPolicyFixed2
+	ACKPolicyQUICHE  = ACKPolicyChromium
 )
 
 const (
-	quicheInitialPacketsBeforeACK   = 2
-	quicheDecimatedPacketsBeforeACK = 10
-	quicheDecimationThreshold       = 100
-	quicheACKDelayRatio             = 0.25
-	quicheAlarmGranularity          = time.Millisecond
-	neqoPacketsBeforeACK            = 2
-	neqoMaxACKDelay                 = 20 * time.Millisecond
+	fixed2PacketsBeforeACK            = 2
+	fixed10PacketsBeforeACK           = 10
+	chromiumInitialPacketsBeforeACK   = 2
+	chromiumDecimatedPacketsBeforeACK = 10
+	chromiumDecimationThreshold       = 100
+	chromiumACKDelayRatio             = 0.25
+	chromiumAlarmGranularity          = time.Millisecond
+	neqoPacketsBeforeACK              = 2
+	neqoMaxACKDelay                   = 20 * time.Millisecond
+
+	// Compatibility aliases for existing internal tests and downstream branches.
+	quicheDecimationThreshold = chromiumDecimationThreshold
 )
 
 // The receivedPacketTracker tracks packets for the Initial and Handshake packet number space.
@@ -93,11 +102,8 @@ func (h *receivedPacketTracker) IsPotentiallyDuplicate(pn protocol.PacketNumber)
 	return h.packetHistory.IsPotentiallyDuplicate(pn)
 }
 
-// Number of ack-eliciting packets received before sending an ACK.
-const packetsBeforeAck = 2
-
 // The appDataReceivedPacketTracker tracks packets received in the Application Data packet number space.
-// It waits until at least 2 packets were received before queueing an ACK, or until the max_ack_delay was reached.
+// It queues ACKs according to the selected packet threshold and delayed-ACK timer.
 type appDataReceivedPacketTracker struct {
 	receivedPacketTracker
 
@@ -176,7 +182,7 @@ func (h *appDataReceivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, 
 			h.ackAlarm = 0
 			return nil
 		}
-		if h.policy == ACKPolicyDefault || h.ackAlarm.IsZero() || deadline.Before(h.ackAlarm) {
+		if h.isFixedPolicy() || h.ackAlarm.IsZero() || deadline.Before(h.ackAlarm) {
 			h.ackAlarm = deadline
 		}
 		if h.logger.Debug() {
@@ -188,15 +194,17 @@ func (h *appDataReceivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, 
 
 func (h *appDataReceivedPacketTracker) packetsBeforeACK(pn protocol.PacketNumber) int {
 	switch h.policy {
-	case ACKPolicyQUICHE:
-		if h.hasFirstObserved && pn >= h.firstObserved+quicheDecimationThreshold {
-			return quicheDecimatedPacketsBeforeACK
+	case ACKPolicyChromium:
+		if h.hasFirstObserved && pn >= h.firstObserved+chromiumDecimationThreshold {
+			return chromiumDecimatedPacketsBeforeACK
 		}
-		return quicheInitialPacketsBeforeACK
+		return chromiumInitialPacketsBeforeACK
 	case ACKPolicyNeqo:
 		return neqoPacketsBeforeACK
-	case ACKPolicyDefault:
-		return packetsBeforeAck
+	case ACKPolicyFixed2:
+		return fixed2PacketsBeforeACK
+	case ACKPolicyFixed10:
+		return fixed10PacketsBeforeACK
 	default:
 		panic(fmt.Sprintf("invalid ACK policy: %d", h.policy))
 	}
@@ -204,21 +212,25 @@ func (h *appDataReceivedPacketTracker) packetsBeforeACK(pn protocol.PacketNumber
 
 func (h *appDataReceivedPacketTracker) ackDelay(pn protocol.PacketNumber) time.Duration {
 	switch h.policy {
-	case ACKPolicyQUICHE:
-		if !h.hasFirstObserved || pn < h.firstObserved+quicheDecimationThreshold || h.rttStats == nil {
+	case ACKPolicyChromium:
+		if !h.hasFirstObserved || pn < h.firstObserved+chromiumDecimationThreshold || h.rttStats == nil {
 			return h.maxAckDelay
 		}
 		return max(
-			quicheAlarmGranularity,
-			min(h.maxAckDelay, time.Duration(float64(h.rttStats.MinRTT())*quicheACKDelayRatio)),
+			chromiumAlarmGranularity,
+			min(h.maxAckDelay, time.Duration(float64(h.rttStats.MinRTT())*chromiumACKDelayRatio)),
 		)
 	case ACKPolicyNeqo:
 		return neqoMaxACKDelay
-	case ACKPolicyDefault:
+	case ACKPolicyFixed2, ACKPolicyFixed10:
 		return h.maxAckDelay
 	default:
 		panic(fmt.Sprintf("invalid ACK policy: %d", h.policy))
 	}
+}
+
+func (h *appDataReceivedPacketTracker) isFixedPolicy() bool {
+	return h.policy == ACKPolicyFixed2 || h.policy == ACKPolicyFixed10
 }
 
 // IgnoreBelow sets a lower limit for acknowledging packets.

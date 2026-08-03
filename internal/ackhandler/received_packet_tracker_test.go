@@ -1,6 +1,7 @@
 package ackhandler
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -84,6 +85,30 @@ func TestAppDataReceivedPacketTrackerAckEverySecondPacket(t *testing.T) {
 	}
 }
 
+func TestFixedACKPoliciesOnlyDifferByPacketThreshold(t *testing.T) {
+	testCases := []struct {
+		name      string
+		policy    ACKPolicy
+		threshold protocol.PacketNumber
+	}{
+		{name: "fixed2", policy: ACKPolicyFixed2, threshold: 2},
+		{name: "fixed10", policy: ACKPolicyFixed10, threshold: 10},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, tc.policy, nil)
+			now := monotime.Now()
+			for pn := protocol.PacketNumber(1); pn < tc.threshold; pn++ {
+				require.NoError(t, tr.ReceivedPacket(pn, protocol.ECNNon, now, true))
+				require.Nil(t, tr.GetAckFrame(now, true))
+			}
+			require.NoError(t, tr.ReceivedPacket(tc.threshold, protocol.ECNNon, now, true))
+			require.NotNil(t, tr.GetAckFrame(now, true))
+			require.Equal(t, protocol.MaxAckDelay, tr.maxAckDelay)
+		})
+	}
+}
+
 func TestAppDataReceivedPacketTrackerQUICHEPolicy(t *testing.T) {
 	rttStats := utils.NewRTTStats()
 	rttStats.UpdateRTT(8*time.Millisecond, 0)
@@ -110,6 +135,40 @@ func TestAppDataReceivedPacketTrackerQUICHEPolicy(t *testing.T) {
 	require.NotNil(t, tr.GetAckFrame(now.Add(10*time.Microsecond), true))
 }
 
+func TestAppDataReceivedPacketTrackerQUICHETimerBounds(t *testing.T) {
+	testCases := []struct {
+		name     string
+		minRTT   time.Duration
+		expected time.Duration
+	}{
+		{name: "clamped to 1ms", minRTT: 2 * time.Millisecond, expected: time.Millisecond},
+		{name: "one quarter of min RTT", minRTT: 40 * time.Millisecond, expected: 10 * time.Millisecond},
+		{name: "clamped to 25ms", minRTT: 200 * time.Millisecond, expected: 25 * time.Millisecond},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rttStats := utils.NewRTTStats()
+			rttStats.UpdateRTT(tc.minRTT, 0)
+			tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyQUICHE, rttStats)
+			now := monotime.Now()
+
+			// The first packet establishes the start of the packet number space.
+			require.NoError(t, tr.ReceivedPacket(10, protocol.ECNNon, now, false))
+			// Before packet number advancement reaches 100, QUICHE still uses 25ms.
+			require.NoError(t, tr.ReceivedPacket(109, protocol.ECNNon, now, true))
+			require.Equal(t, now.Add(protocol.MaxAckDelay), tr.GetAlarmTimeout())
+			require.NotNil(t, tr.GetAckFrame(now, false))
+
+			rcvTime := now.Add(time.Millisecond)
+			require.NoError(t, tr.ReceivedPacket(110, protocol.ECNNon, rcvTime, true))
+			require.Equal(t, rcvTime.Add(tc.expected), tr.GetAlarmTimeout())
+			require.Nil(t, tr.GetAckFrame(rcvTime.Add(tc.expected-time.Nanosecond), true))
+			require.NotNil(t, tr.GetAckFrame(rcvTime.Add(tc.expected), true))
+		})
+	}
+}
+
 func TestAppDataReceivedPacketTrackerNeqoPolicy(t *testing.T) {
 	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyNeqo, nil)
 	now := monotime.Now()
@@ -125,6 +184,34 @@ func TestAppDataReceivedPacketTrackerNeqoPolicy(t *testing.T) {
 	require.NotNil(t, tr.GetAckFrame(now, true))
 	require.NoError(t, tr.ReceivedPacket(3, protocol.ECNNon, now, true))
 	require.NotNil(t, tr.GetAckFrame(now, true))
+}
+
+func TestAppDataReceivedPacketTrackerNeqoTimerExpiresAt20ms(t *testing.T) {
+	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyNeqo, nil)
+	now := monotime.Now()
+
+	require.NoError(t, tr.ReceivedPacket(1, protocol.ECNNon, now, true))
+	require.Nil(t, tr.GetAckFrame(now.Add(neqoMaxACKDelay-time.Nanosecond), true))
+	require.NotNil(t, tr.GetAckFrame(now.Add(neqoMaxACKDelay), true))
+}
+
+func TestACKPoliciesImmediatelyACKPreviouslyReportedMissingPacket(t *testing.T) {
+	for _, policy := range []ACKPolicy{ACKPolicyQUICHE, ACKPolicyNeqo} {
+		t.Run(fmt.Sprintf("policy %d", policy), func(t *testing.T) {
+			tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, policy, utils.NewRTTStats())
+			now := monotime.Now()
+
+			// Packet 2 is missing from the ACK generated for packets 1 and 3.
+			require.NoError(t, tr.ReceivedPacket(1, protocol.ECNNon, now, true))
+			require.NoError(t, tr.ReceivedPacket(3, protocol.ECNNon, now, true))
+			require.NotNil(t, tr.GetAckFrame(now, true))
+
+			// Receiving the previously reported missing packet triggers an ACK after
+			// one packet, without waiting for either policy's packet threshold.
+			require.NoError(t, tr.ReceivedPacket(2, protocol.ECNNon, now, true))
+			require.NotNil(t, tr.GetAckFrame(now, true))
+		})
+	}
 }
 
 func TestAppDataReceivedPacketTrackerNeqoImmediatelyACKsReordering(t *testing.T) {

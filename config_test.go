@@ -68,9 +68,11 @@ func TestConfigValidation(t *testing.T) {
 }
 
 func TestValidateACKPolicy(t *testing.T) {
-	require.NoError(t, validateConfig(&Config{ACKPolicy: ACKPolicyQUICHE}))
+	require.NoError(t, validateConfig(&Config{ACKPolicy: ACKPolicyFixed2}))
+	require.NoError(t, validateConfig(&Config{ACKPolicy: ACKPolicyFixed10}))
 	require.NoError(t, validateConfig(&Config{ACKPolicy: ACKPolicyNeqo}))
-	require.Error(t, validateConfig(&Config{ACKPolicy: ACKPolicyNeqo + 1}))
+	require.NoError(t, validateConfig(&Config{ACKPolicy: ACKPolicyChromium}))
+	require.Error(t, validateConfig(&Config{ACKPolicy: ACKPolicyChromium + 1}))
 }
 
 func TestConfigHandshakeIdleTimeout(t *testing.T) {
@@ -135,7 +137,7 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 		case "EnableStreamResetPartialDelivery":
 			f.Set(reflect.ValueOf(true))
 		case "ACKPolicy":
-			f.Set(reflect.ValueOf(ACKPolicyQUICHE))
+			f.Set(reflect.ValueOf(ACKPolicyChromium))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}

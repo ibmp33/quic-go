@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,21 +23,60 @@ import (
 	"github.com/quic-go/quic-go/http3/qlog"
 )
 
+var (
+	gitCommit = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
 	urlStr := flag.String("url", "", "single URL to fetch, e.g. https://127.0.0.1:4433/")
-	ackPolicyName := flag.String("ack-policy", "default", "ACK policy: default, quiche, or neqo")
+	ackPolicyName := flag.String("ack-policy", "", "ACK policy: fixed2, fixed10, neqo, or chromium (required)")
 	localPort := flag.Int("local-port", 0, "optional fixed local UDP port")
 	startAtUnixNS := flag.Int64("start-at-unix-ns", 0, "wait until this Unix timestamp before starting the request")
-	metricsPath := flag.String("metrics", "", "optional CSV path for cumulative response bytes")
+	startTimeout := flag.Duration("start-timeout", 30*time.Second, "maximum time to wait for -start-at-unix-ns")
+	metricsPath := flag.String("metrics", "", "CSV path for cumulative response bytes (required)")
 	caPath := flag.String("ca", "", "optional CA certificate path")
 	insecure := flag.Bool("insecure", false, "skip certificate verification")
+	serverName := flag.String("server-name", "", "optional TLS server name override")
 	qlogDir := flag.String("qlog-dir", "", "directory for qlog output")
 	outPath := flag.String("o", "", "optional output file path")
-	timeout := flag.Duration("timeout", 30*time.Second, "request timeout")
+	duration := flag.Duration("duration", 30*time.Second, "maximum transfer duration")
+	legacyTimeout := flag.Duration("timeout", 0, "deprecated alias for -duration")
+	maxBytes := flag.Uint64("max-bytes", 0, "maximum response body bytes to read (0 is unlimited)")
+	readBuffer := flag.Int("read-buffer", 64<<10, "response body read buffer size")
+	showVersion := flag.Bool("version", false, "print build information and exit")
 	flag.Parse()
 
+	if *showVersion {
+		printVersion()
+		return
+	}
 	if *urlStr == "" {
 		log.Fatal("missing -url")
+	}
+	if *ackPolicyName == "" {
+		log.Fatal("missing -ack-policy; valid values: fixed2, fixed10, neqo, chromium")
+	}
+	if *metricsPath == "" {
+		log.Fatal("missing -metrics")
+	}
+	if *duration <= 0 {
+		log.Fatal("-duration must be greater than 0")
+	}
+	if *legacyTimeout < 0 {
+		log.Fatal("-timeout must be greater than 0")
+	}
+	if *legacyTimeout > 0 {
+		*duration = *legacyTimeout
+	}
+	if *startTimeout <= 0 {
+		log.Fatal("-start-timeout must be greater than 0")
+	}
+	if *localPort < 0 || *localPort > 65535 {
+		log.Fatal("-local-port must be between 0 and 65535")
+	}
+	if *readBuffer <= 0 {
+		log.Fatal("-read-buffer must be greater than 0")
 	}
 
 	if *qlogDir != "" {
@@ -52,6 +92,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("build TLS config: %v", err)
 	}
+	tlsConf.ServerName = *serverName
 	ackPolicy, err := parseACKPolicy(*ackPolicyName)
 	if err != nil {
 		log.Fatal(err)
@@ -85,18 +126,22 @@ func main() {
 
 	client := &http.Client{
 		Transport: rt,
-		Timeout:   *timeout,
+		Timeout:   *duration,
 	}
+	printACKPolicyConfiguration(*ackPolicyName)
 
 	if *startAtUnixNS > 0 {
 		startAt := time.Unix(0, *startAtUnixNS)
 		if delay := time.Until(startAt); delay > 0 {
+			if delay > *startTimeout {
+				log.Fatalf("scheduled start is %s away, exceeding -start-timeout %s", delay, *startTimeout)
+			}
 			timer := time.NewTimer(delay)
 			<-timer.C
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), *duration)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, *urlStr, nil)
 	if err != nil {
@@ -129,7 +174,11 @@ func main() {
 		defer f.Close()
 		destination = io.MultiWriter(f, destination)
 	}
-	_, copyErr := io.Copy(destination, resp.Body)
+	var source io.Reader = resp.Body
+	if *maxBytes > 0 {
+		source = io.LimitReader(source, int64(*maxBytes))
+	}
+	_, copyErr := io.CopyBuffer(destination, source, make([]byte, *readBuffer))
 	stopMetrics()
 	if copyErr != nil && !errors.Is(copyErr, context.DeadlineExceeded) {
 		log.Fatalf("read response body: %v", copyErr)
@@ -144,6 +193,9 @@ func main() {
 	fmt.Printf("ACK policy: %s\n", *ackPolicyName)
 	fmt.Printf("Local UDP port: %d\n", *localPort)
 	fmt.Printf("Request start Unix ns: %d\n", start.UnixNano())
+	if *startAtUnixNS > 0 {
+		fmt.Printf("Request start error us: %.3f\n", float64(start.UnixNano()-*startAtUnixNS)/1e3)
+	}
 	fmt.Printf("Bytes: %d\n", n)
 	fmt.Printf("Elapsed: %s\n", elapsed)
 	if errors.Is(copyErr, context.DeadlineExceeded) {
@@ -213,15 +265,57 @@ func startMetricsRecorder(path string, start time.Time, count *atomic.Int64) (fu
 
 func parseACKPolicy(name string) (quic.ACKPolicy, error) {
 	switch name {
-	case "default":
-		return quic.ACKPolicyDefault, nil
-	case "quiche":
-		return quic.ACKPolicyQUICHE, nil
+	case "fixed2":
+		return quic.ACKPolicyFixed2, nil
+	case "fixed10":
+		return quic.ACKPolicyFixed10, nil
 	case "neqo":
 		return quic.ACKPolicyNeqo, nil
+	case "chromium":
+		return quic.ACKPolicyChromium, nil
 	default:
-		return quic.ACKPolicyDefault, fmt.Errorf("unknown ACK policy %q (want default, quiche, or neqo)", name)
+		return quic.ACKPolicyFixed2, fmt.Errorf("invalid -ack-policy %q; valid values: fixed2, fixed10, neqo, chromium", name)
 	}
+}
+
+func printVersion() {
+	fmt.Println("quic-go-policy-client")
+	fmt.Printf("commit: %s\n", gitCommit)
+	fmt.Printf("build_time: %s\n", buildTime)
+	fmt.Println("policies: fixed2,fixed10,neqo,chromium")
+}
+
+func printACKPolicyConfiguration(name string) {
+	config := map[string]any{
+		"event":  "ack_policy_initialized",
+		"policy": name,
+	}
+	switch name {
+	case "fixed2":
+		config["initial_threshold"] = 2
+		config["steady_threshold"] = 2
+		config["max_ack_delay_us"] = 25000
+	case "fixed10":
+		config["initial_threshold"] = 10
+		config["steady_threshold"] = 10
+		config["max_ack_delay_us"] = 25000
+	case "neqo":
+		config["initial_threshold"] = 2
+		config["steady_threshold"] = 2
+		config["max_ack_delay_us"] = 20000
+		config["reordering_behavior"] = "immediate"
+	case "chromium":
+		config["initial_threshold"] = 2
+		config["steady_threshold"] = 10
+		config["switch_after_packet_number_advance"] = 100
+		config["max_ack_delay_us"] = 25000
+		config["steady_ack_delay"] = "clamp(min_rtt/4,1ms,25ms)"
+	}
+	b, err := json.Marshal(config)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(b))
 }
 
 func buildTLSConfig(caPath string, insecure bool) (*tls.Config, error) {
