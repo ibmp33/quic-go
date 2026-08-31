@@ -66,6 +66,10 @@ func main() {
 	legacyTimeout := flag.Duration("timeout", 0, "deprecated alias for -duration")
 	maxBytes := flag.Uint64("max-bytes", 0, "maximum payload bytes to read (0 is unlimited)")
 	readBuffer := flag.Int("read-buffer", 64<<10, "payload read buffer size")
+	initialStreamReceiveWindow := flag.Uint64("initial-stream-receive-window", 0, "initial per-stream receive flow-control window in bytes")
+	maxStreamReceiveWindow := flag.Uint64("max-stream-receive-window", 0, "maximum per-stream receive flow-control window in bytes")
+	initialConnectionReceiveWindow := flag.Uint64("initial-connection-receive-window", 0, "initial connection receive flow-control window in bytes")
+	maxConnectionReceiveWindow := flag.Uint64("max-connection-receive-window", 0, "maximum connection receive flow-control window in bytes")
 	showVersion := flag.Bool("version", false, "print build information and exit")
 	flag.Parse()
 
@@ -116,6 +120,14 @@ func main() {
 	}
 	if *readBuffer <= 0 {
 		log.Fatal("-read-buffer must be greater than 0")
+	}
+	if *paperV1 && (*initialStreamReceiveWindow == 0 || *maxStreamReceiveWindow == 0 ||
+		*initialConnectionReceiveWindow == 0 || *maxConnectionReceiveWindow == 0) {
+		log.Fatal("-paper-v1 requires explicit non-zero receive flow-control windows")
+	}
+	if *maxStreamReceiveWindow < *initialStreamReceiveWindow ||
+		*maxConnectionReceiveWindow < *initialConnectionReceiveWindow {
+		log.Fatal("maximum receive flow-control windows must not be smaller than initial windows")
 	}
 	if *maxBytes > ^uint64(0)>>1 {
 		log.Fatal("-max-bytes must not exceed 9223372036854775807")
@@ -170,10 +182,18 @@ func main() {
 	quicConf := &quic.Config{
 		ACKPolicy: ackPolicy, ACKFrequencyMode: ackFrequencyMode,
 		PaperV1Mode: *paperV1, ACKPolicyFlowID: *flowID,
-		ACKPolicySpecSHA256:         *policySpecSHA256,
-		ACKPolicyEventSchemaVersion: "receiver-ack-event-v1.0.0",
-		ProcessStartIdentity:        fmt.Sprintf("pid:%d:start_unix_ns:%d", os.Getpid(), processStartUnixNS),
+		ACKPolicySpecSHA256:            *policySpecSHA256,
+		ACKPolicyEventSchemaVersion:    "receiver-ack-event-v1.0.0",
+		ProcessStartIdentity:           fmt.Sprintf("pid:%d:start_unix_ns:%d", os.Getpid(), processStartUnixNS),
+		InitialStreamReceiveWindow:     *initialStreamReceiveWindow,
+		MaxStreamReceiveWindow:         *maxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: *initialConnectionReceiveWindow,
+		MaxConnectionReceiveWindow:     *maxConnectionReceiveWindow,
 	}
+	fmt.Printf("Initial stream receive window: %d\n", *initialStreamReceiveWindow)
+	fmt.Printf("Maximum stream receive window: %d\n", *maxStreamReceiveWindow)
+	fmt.Printf("Initial connection receive window: %d\n", *initialConnectionReceiveWindow)
+	fmt.Printf("Maximum connection receive window: %d\n", *maxConnectionReceiveWindow)
 	if *ackPolicyLog != "" {
 		handler, closeLog, err := newACKPolicyJSONLHandler(*ackPolicyLog)
 		if err != nil {
