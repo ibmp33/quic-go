@@ -214,7 +214,10 @@ func (h *appDataReceivedPacketTracker) ReceivedPacket(pn protocol.PacketNumber, 
 	if h.hasLargestObserved {
 		nextInOrder = h.largestObserved + 1
 	}
-	outOfOrder := pn != nextInOrder
+	// QUIC endpoints randomize their initial packet number. The first observed
+	// packet establishes the local ordering baseline and is never reordered
+	// merely because its packet number is non-zero.
+	outOfOrder := h.hasLargestObserved && pn != nextInOrder
 	var reorderingDistance protocol.PacketNumber
 	if h.hasLargestObserved && pn > h.largestObserved+1 {
 		reorderingDistance = pn - (h.largestObserved + 1)

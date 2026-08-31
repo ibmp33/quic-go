@@ -189,6 +189,14 @@ func TestAppDataReceivedPacketTrackerNeqoPolicy(t *testing.T) {
 	require.NotNil(t, tr.GetAckFrame(now, true))
 }
 
+func TestNeqoLikeRandomInitialPacketNumberIsNotReordering(t *testing.T) {
+	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyNeqoLike, nil)
+	now := monotime.Now()
+	require.NoError(t, tr.ReceivedPacket(14_972_850, protocol.ECNNon, now, true))
+	require.Nil(t, tr.GetAckFrame(now, true))
+	require.Equal(t, now.Add(neqoMaxACKDelay), tr.GetAlarmTimeout())
+}
+
 func TestAppDataReceivedPacketTrackerNeqoTimerExpiresAt20ms(t *testing.T) {
 	tr := newAppDataReceivedPacketTrackerWithPolicy(utils.DefaultLogger, ACKPolicyNeqo, nil)
 	now := monotime.Now()
