@@ -206,3 +206,13 @@ func TestParseACKFrequencyMode(t *testing.T) {
 	_, err = parseACKFrequencyMode("draft11")
 	require.EqualError(t, err, `invalid -ack-frequency-mode "draft11"; valid values: disabled, mvfst-draft`)
 }
+
+func TestOpenKeyLogCreatesPrivateFileAndParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "flow.keys")
+	file, err := openKeyLog(path)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}

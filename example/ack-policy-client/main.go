@@ -59,6 +59,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "skip certificate verification")
 	serverName := flag.String("server-name", "", "optional TLS server name override")
 	qlogDir := flag.String("qlog-dir", "", "directory for qlog output")
+	keyLogPath := flag.String("keylog", "", "TLS key log path (required with -paper-v1)")
 	outPath := flag.String("o", "", "optional output file path")
 	duration := flag.Duration("duration", 30*time.Second, "maximum transfer duration")
 	legacyTimeout := flag.Duration("timeout", 0, "deprecated alias for -duration")
@@ -146,9 +147,18 @@ func main() {
 		if ackFrequencyMode != quic.ACKFrequencyDisabled {
 			log.Fatal("-paper-v1 requires -ack-frequency-mode=disabled")
 		}
-		if *ackPolicyLog == "" || *flowID == "" || *policySpecSHA256 == "" {
-			log.Fatal("-paper-v1 requires -ack-policy-log, -flow-id, and -policy-spec-sha256")
+		if *ackPolicyLog == "" || *flowID == "" || *policySpecSHA256 == "" || *keyLogPath == "" {
+			log.Fatal("-paper-v1 requires -ack-policy-log, -flow-id, -policy-spec-sha256, and -keylog")
 		}
+	}
+	var keyLogFile *os.File
+	if *keyLogPath != "" {
+		keyLogFile, err = openKeyLog(*keyLogPath)
+		if err != nil {
+			log.Fatalf("open TLS key log: %v", err)
+		}
+		defer keyLogFile.Close()
+		tlsConf.KeyLogWriter = keyLogFile
 	}
 	quicConf := &quic.Config{
 		ACKPolicy: ackPolicy, ACKFrequencyMode: ackFrequencyMode,
@@ -698,4 +708,17 @@ func buildTLSConfig(caPath string, insecure bool) (*tls.Config, error) {
 		}
 	}
 	return &tls.Config{RootCAs: pool}, nil
+}
+
+func openKeyLog(path string) (*os.File, error) {
+	if path == "" {
+		return nil, errors.New("empty key log path")
+	}
+	dir := filepath.Dir(path)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 }
