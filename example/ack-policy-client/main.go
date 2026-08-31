@@ -281,7 +281,8 @@ func main() {
 	}
 	_, copyErr := io.CopyBuffer(destination, source, make([]byte, *readBuffer))
 	stopMetrics()
-	if copyErr != nil && !errors.Is(copyErr, context.DeadlineExceeded) {
+	durationEnded := copyErr != nil && (errors.Is(copyErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded))
+	if copyErr != nil && !durationEnded {
 		log.Fatalf("read response body: %v", copyErr)
 	}
 
@@ -300,7 +301,7 @@ func main() {
 	}
 	fmt.Printf("Bytes: %d\n", n)
 	fmt.Printf("Elapsed: %s\n", elapsed)
-	if errors.Is(copyErr, context.DeadlineExceeded) {
+	if durationEnded {
 		fmt.Println("Transfer ended: request timeout (expected for a duration-limited run)")
 	}
 	if *outPath != "" {
