@@ -114,6 +114,15 @@ func newCubicSender(
 		maxDatagramSize:            initialMaxDatagramSize,
 	}
 	c.pacer = newPacer(c.BandwidthEstimate)
+	activeCC := "cubic"
+	if reno {
+		activeCC = "reno"
+	}
+	writePaperV1Runtime(map[string]any{
+		"event": "controller_initialized", "active_cc": activeCC,
+		"initial_congestion_window_bytes": int64(initialCongestionWindow),
+		"initial_max_datagram_size":       int64(initialMaxDatagramSize),
+	})
 	if c.qlogger != nil {
 		c.lastState = qlog.CongestionStateSlowStart
 		c.qlogger.RecordEvent(qlog.CongestionStateUpdated{

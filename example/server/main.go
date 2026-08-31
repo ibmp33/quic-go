@@ -80,6 +80,7 @@ func main() {
 	keyFile := flag.String("key", "./testcert/priv.key", "TLS private key path")
 	qlogDir := flag.String("qlog-dir", "", "directory for qlog output")
 	rootDir := flag.String("root", "", "optional static file root directory")
+	runtimeReport := flag.String("paper-v1-runtime-report", "", "append-only Paper-v1 sender transport telemetry")
 	showVersion := flag.Bool("version", false, "print build information and exit")
 	flag.Parse()
 
@@ -102,6 +103,18 @@ func main() {
 		}
 		if err := os.Setenv("QLOGDIR", absDir); err != nil {
 			log.Fatalf("set QLOGDIR: %v", err)
+		}
+	}
+	if *runtimeReport != "" {
+		artifact, err := os.OpenFile(*runtimeReport, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err != nil {
+			log.Fatalf("create runtime report: %v", err)
+		}
+		if err := artifact.Close(); err != nil {
+			log.Fatalf("close runtime report: %v", err)
+		}
+		if err := os.Setenv("QUIC_GO_PAPER_V1_SENDER_RUNTIME", *runtimeReport); err != nil {
+			log.Fatalf("enable runtime report: %v", err)
 		}
 	}
 
