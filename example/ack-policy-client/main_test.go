@@ -73,6 +73,20 @@ func TestRawTransferWriterCountsAndLimitsAcrossWrites(t *testing.T) {
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
 }
 
+func TestContinuousReadObserverCountsCallsAndProcessingGap(t *testing.T) {
+	observer := &continuousReadObserver{reader: bytes.NewBufferString("abcdef")}
+	buffer := make([]byte, 3)
+	n, err := observer.Read(buffer)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	time.Sleep(time.Millisecond)
+	n, err = observer.Read(buffer)
+	require.NoError(t, err)
+	require.Equal(t, 3, n)
+	require.EqualValues(t, 2, observer.calls)
+	require.GreaterOrEqual(t, observer.maxProcessingGap, time.Millisecond)
+}
+
 func TestExpectedRawTermination(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	require.True(t, isExpectedRawTermination(nil, ctx, false))

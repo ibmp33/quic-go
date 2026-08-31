@@ -307,7 +307,8 @@ func main() {
 	if *maxBytes > 0 {
 		source = io.LimitReader(source, int64(*maxBytes))
 	}
-	_, copyErr := io.CopyBuffer(destination, source, make([]byte, *readBuffer))
+	readObserver := &continuousReadObserver{reader: source}
+	_, copyErr := io.CopyBuffer(destination, readObserver, make([]byte, *readBuffer))
 	stopMetrics()
 	durationEnded := copyErr != nil && (errors.Is(copyErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded))
 	if copyErr != nil && !durationEnded {
@@ -324,6 +325,8 @@ func main() {
 	fmt.Printf("ACK policy: %s\n", *ackPolicyName)
 	fmt.Printf("Local UDP port: %d\n", *localPort)
 	fmt.Printf("Initial DCID length: %d\n", *initialDCIDLength)
+	fmt.Printf("Body read calls: %d\n", readObserver.calls)
+	fmt.Printf("Maximum body read processing gap ns: %d\n", readObserver.maxProcessingGap.Nanoseconds())
 	fmt.Printf("Request start Unix ns: %d\n", start.UnixNano())
 	if *startAtUnixNS > 0 {
 		fmt.Printf("Request start error us: %.3f\n", float64(start.UnixNano()-*startAtUnixNS)/1e3)
@@ -545,6 +548,29 @@ func isExpectedRawTermination(err error, ctx context.Context, limitReached bool)
 
 type countingWriter struct {
 	count *atomic.Int64
+}
+
+// continuousReadObserver measures application think time between a completed
+// body Read and the next Read call. Time blocked inside the underlying Read is
+// network / transport wait, not application-limited time.
+type continuousReadObserver struct {
+	reader           io.Reader
+	calls            uint64
+	lastReturn       time.Time
+	maxProcessingGap time.Duration
+}
+
+func (r *continuousReadObserver) Read(p []byte) (int, error) {
+	now := time.Now()
+	if !r.lastReturn.IsZero() {
+		if gap := now.Sub(r.lastReturn); gap > r.maxProcessingGap {
+			r.maxProcessingGap = gap
+		}
+	}
+	r.calls++
+	n, err := r.reader.Read(p)
+	r.lastReturn = time.Now()
+	return n, err
 }
 
 func (w countingWriter) Write(p []byte) (int, error) {
