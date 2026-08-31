@@ -130,6 +130,26 @@ func TestMarshalAndUnmarshalTransportParameters(t *testing.T) {
 	require.Equal(t, minAckDelay, *p.MinAckDelay)
 }
 
+func TestMvfstMinAckDelayTransportParameterCodepoint(t *testing.T) {
+	minAckDelay := time.Millisecond
+	params := &TransportParameters{
+		InitialSourceConnectionID: protocol.ParseConnectionID([]byte("foobar")),
+		MaxUDPPayloadSize:         protocol.MaxPacketBufferSize,
+		MaxAckDelay:               protocol.MaxAckDelay,
+		ActiveConnectionIDLimit:   protocol.DefaultActiveConnectionIDLimit,
+		MinAckDelay:               &minAckDelay,
+		UseMvfstAckFrequency:      true,
+	}
+	data := params.Marshal(protocol.PerspectiveClient)
+	require.True(t, bytes.Contains(data, quicvarint.Append(nil, uint64(minAckDelayMvfstParameterID))))
+	require.False(t, bytes.Contains(data, quicvarint.Append(nil, uint64(minAckDelayParameterID))))
+
+	var parsed TransportParameters
+	require.NoError(t, parsed.Unmarshal(data, protocol.PerspectiveClient))
+	require.NotNil(t, parsed.MinAckDelay)
+	require.Equal(t, minAckDelay, *parsed.MinAckDelay)
+}
+
 func TestResetStreamAtTransportParameterCodepoints(t *testing.T) {
 	for _, tc := range []struct {
 		name string

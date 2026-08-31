@@ -44,6 +44,7 @@ func TestIsFrameTypeAckEliciting(t *testing.T) {
 		wire.FrameTypeDatagramWithLength: true,
 		wire.FrameTypeAckFrequency:       true,
 		wire.FrameTypeImmediateAck:       true,
+		wire.FrameTypeImmediateAckMvfst:  true,
 	}
 
 	for ft, expected := range testCases {

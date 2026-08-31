@@ -1,6 +1,7 @@
 package ackhandler
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -51,6 +52,21 @@ func TestGenerateACKsForPacketNumberSpaces(t *testing.T) {
 	require.Zero(t, oneRTTAck.ECT0)
 	require.Zero(t, oneRTTAck.ECT1)
 	require.EqualValues(t, 2, oneRTTAck.ECNCE)
+}
+
+func TestACKPoliciesImmediatelyACKInitialAndHandshakeServerPackets(t *testing.T) {
+	for _, policy := range []ACKPolicy{ACKPolicyQUICHE, ACKPolicyNeqo} {
+		t.Run(fmt.Sprintf("policy %d", policy), func(t *testing.T) {
+			handler := NewReceivedPacketHandlerWithPolicy(utils.DefaultLogger, policy, utils.NewRTTStats())
+			now := monotime.Now()
+
+			require.NoError(t, handler.ReceivedPacket(1, protocol.ECNNon, protocol.EncryptionInitial, now, true))
+			require.NotNil(t, handler.GetAckFrame(protocol.EncryptionInitial, now, true))
+
+			require.NoError(t, handler.ReceivedPacket(1, protocol.ECNNon, protocol.EncryptionHandshake, now, true))
+			require.NotNil(t, handler.GetAckFrame(protocol.EncryptionHandshake, now, true))
+		})
+	}
 }
 
 func TestReceive0RTTAnd1RTT(t *testing.T) {

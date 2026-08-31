@@ -26,6 +26,68 @@ const (
 	Version2 = protocol.Version2
 )
 
+// ACKPolicyDefinition is the machine-readable description compiled into the
+// endpoint. Experiment manifests should record this object verbatim.
+type ACKPolicyDefinition struct {
+	Name               string         `json:"name"`
+	Version            string         `json:"version"`
+	Reference          string         `json:"reference"`
+	ReferenceCommit    string         `json:"reference_commit"`
+	StateScope         string         `json:"state_scope"`
+	PacketNumberSpaces map[string]any `json:"packet_number_spaces"`
+	Parameters         map[string]any `json:"parameters"`
+}
+
+// DescribeACKPolicy returns the parameters actually compiled into this build.
+func DescribeACKPolicy(policy ACKPolicy) ACKPolicyDefinition {
+	cryptoSpaces := map[string]any{"threshold": 1, "ack_delay_us": 0, "mode": "immediate"}
+	switch policy {
+	case ACKPolicyNeqoLike:
+		return ACKPolicyDefinition{
+			Name: ACKPolicyNeqoLikeName, Version: ACKPolicyNeqoLikeVersion,
+			Reference:       "https://github.com/mozilla/neqo/blob/e2a2a7459b8b51778b50209251a61fc5ca020893/neqo-transport/src/tracking.rs",
+			ReferenceCommit: "e2a2a7459b8b51778b50209251a61fc5ca020893", StateScope: "per-connection-per-packet-number-space",
+			PacketNumberSpaces: map[string]any{"initial": cryptoSpaces, "handshake": cryptoSpaces, "application_data": map[string]any{"mode": "application-delayed-ack"}},
+			Parameters: map[string]any{
+				"initial_threshold": 2, "steady_threshold": 2,
+				"threshold_transition": "none", "transition_counter": "none", "transition_boundary": "none",
+				"local_max_ack_delay_us":                    20000,
+				"rtt_deadline":                              "min(first-pending-ack-eliciting-receive-time+20ms,last-ACK-send-time+smoothed-RTT) when last ACK and SRTT exist",
+				"out_of_order_immediate_ack":                "packet-number is not the next in-order application packet number",
+				"previously_reported_missing_immediate_ack": true,
+				"ecn_ce_additional_immediate_ack":           false,
+				"state_reset":                               "new connection creates new trackers; no modeled migration reset within a connection",
+				"ack_frequency_override":                    "forbidden in paper-v1",
+			},
+		}
+	case ACKPolicyChromeLike:
+		return ACKPolicyDefinition{
+			Name: ACKPolicyChromeLikeName, Version: ACKPolicyChromeLikeVersion,
+			Reference:       "https://github.com/google/quiche/blob/38097a7a48d5f7d0853ec0ece88269c08283c9c7/quiche/quic/core/quic_received_packet_manager.cc",
+			ReferenceCommit: "38097a7a48d5f7d0853ec0ece88269c08283c9c7", StateScope: "per-connection-per-packet-number-space",
+			PacketNumberSpaces: map[string]any{"initial": cryptoSpaces, "handshake": cryptoSpaces, "application_data": map[string]any{"initial_state": "initial-ack-every-2", "steady_state": "decimated-ack-every-10"}},
+			Parameters: map[string]any{
+				"initial_threshold": 2, "steady_threshold": 10,
+				"transition_counter":                        "application-data ACK-eliciting packet-number position relative to the least-observed application packet number; not received-packet count or ACK count",
+				"transition_boundary":                       "observed_ack_eliciting_pn >= least_observed_application_pn + 100",
+				"boundary_packet_uses":                      "new steady state threshold and timer",
+				"transition_direction":                      "one-way exactly once per connection",
+				"initial_max_ack_delay_us":                  25000,
+				"steady_max_ack_delay":                      "max(1ms,min(25ms,minRTT/4))",
+				"new_gap_immediate_ack_scope":               "first four received packets in the newest packet-number range after a gap",
+				"previously_reported_missing_immediate_ack": false,
+				"ecn_ce_immediate_ack":                      "only on transition from non-CE to CE",
+				"state_reset":                               "new connection creates new trackers; no modeled migration reset within a connection",
+				"ack_frequency_override":                    "forbidden in paper-v1",
+			},
+		}
+	case ACKPolicyFixed10:
+		return ACKPolicyDefinition{Name: "synthetic-fixed-ack-10", Version: "1.0.0", StateScope: "per-connection", Parameters: map[string]any{"threshold": 10, "max_ack_delay_us": 25000}}
+	default:
+		return ACKPolicyDefinition{Name: "synthetic-fixed-ack-2", Version: "1.0.0", StateScope: "per-connection", Parameters: map[string]any{"threshold": 2, "max_ack_delay_us": 25000}}
+	}
+}
+
 // SupportedVersions returns the support versions, sorted in descending order of preference.
 func SupportedVersions() []Version {
 	// clone the slice to prevent the caller from modifying the slice
@@ -96,6 +158,105 @@ type ConnectionIDGenerator interface {
 	// Implementations must return constant-length Connection IDs with lengths between 0 and 20 bytes.
 	// A length of 0 can only be used when an endpoint doesn't need to multiplex connections during migration.
 	ConnectionIDLen() int
+}
+
+// ACKPolicy selects the receiver-side ACK generation policy for application data.
+// It is intended for controlled experiments. Initial and Handshake packets are
+// always acknowledged immediately.
+type ACKPolicy uint8
+
+const (
+	// ACKPolicyFixed2 uses an ACK threshold of 2 ack-eliciting application data packets.
+	ACKPolicyFixed2 ACKPolicy = iota
+	// ACKPolicyFixed10 uses an ACK threshold of 10 ack-eliciting application data packets.
+	// Apart from the threshold, it uses the same ACK state machine as ACKPolicyFixed2.
+	ACKPolicyFixed10
+	// ACKPolicyNeqoLike models the receiver ACK state machine documented by the
+	// pinned Neqo reference revision. It is not a claim that this endpoint is Firefox.
+	ACKPolicyNeqoLike
+	// ACKPolicyChromeLike models QUICHE's receiver ACK-decimation state machine
+	// at the pinned Chromium reference revision. It is not a claim that this
+	// endpoint is Chrome.
+	ACKPolicyChromeLike
+
+	// ACKPolicyDefault is kept as an alias for quic-go's default ACK2 policy.
+	ACKPolicyDefault = ACKPolicyFixed2
+	// ACKPolicyQUICHE is kept as a source-compatible alias for the policy that was
+	// previously exposed under this name. New experiment code should use
+	// ACKPolicyChromium.
+	ACKPolicyNeqo     = ACKPolicyNeqoLike
+	ACKPolicyChromium = ACKPolicyChromeLike
+	ACKPolicyQUICHE   = ACKPolicyChromeLike
+)
+
+const (
+	ACKPolicyNeqoLikeName      = "neqo-like-ack"
+	ACKPolicyNeqoLikeVersion   = "1.0.0"
+	ACKPolicyChromeLikeName    = "chrome-like-ack"
+	ACKPolicyChromeLikeVersion = "1.0.0"
+)
+
+// ACKPolicyEvent is emitted by the receiver ACK state machine. MonotonicTime
+// is measured from construction of this connection's receiver state.
+type ACKPolicyEvent struct {
+	SchemaVersion                  string              `json:"schema_version"`
+	Event                          string              `json:"event"`
+	ConnectionID                   string              `json:"connection_id"`
+	FlowID                         string              `json:"flow_id"`
+	PolicyName                     string              `json:"policy_name"`
+	PolicyVersion                  string              `json:"policy_version"`
+	PolicySpecSHA256               string              `json:"policy_spec_sha256"`
+	EffectiveParameters            map[string]any      `json:"effective_parameters,omitempty"`
+	ProcessStartIdentity           string              `json:"process_start_identity,omitempty"`
+	PacketNumber                   uint64              `json:"packet_number"`
+	PacketNumberSpace              string              `json:"packet_number_space"`
+	OldState                       string              `json:"old_state,omitempty"`
+	NewState                       string              `json:"new_state,omitempty"`
+	PolicyState                    string              `json:"policy_state,omitempty"`
+	MonotonicTime                  time.Duration       `json:"monotonic_time_ns"`
+	Reason                         string              `json:"reason"`
+	Trigger                        string              `json:"trigger_reason,omitempty"`
+	ACKBatchSize                   int                 `json:"ack_batch_size,omitempty"`
+	NewlyAcknowledgedPacketCount   int                 `json:"newly_acknowledged_packet_count,omitempty"`
+	ACKRanges                      []ACKPolicyACKRange `json:"ack_ranges,omitempty"`
+	LargestAcknowledged            uint64              `json:"largest_acknowledged"`
+	ACKSpacing                     time.Duration       `json:"ack_spacing_ns,omitempty"`
+	ACKDelay                       time.Duration       `json:"ack_delay_ns,omitempty"`
+	TimerDeadline                  time.Duration       `json:"timer_deadline_ns,omitempty"`
+	Threshold                      uint64              `json:"effective_threshold"`
+	ReferencePacketNumber          uint64              `json:"reference_packet_number"`
+	ObservedPacketNumber           uint64              `json:"observed_packet_number"`
+	TransitionBoundaryPacketNumber uint64              `json:"transition_boundary_packet_number"`
+	TransitionSequenceNumber       uint64              `json:"transition_sequence_number,omitempty"`
+}
+
+// ACKPolicyACKRange is a stable JSON representation of one ACK range.
+type ACKPolicyACKRange struct {
+	Smallest uint64 `json:"smallest"`
+	Largest  uint64 `json:"largest"`
+}
+
+// ACKFrequencyMode selects an explicitly versioned ACK_FREQUENCY
+// compatibility profile. The zero value disables negotiation and parsing.
+type ACKFrequencyMode uint8
+
+const (
+	ACKFrequencyDisabled ACKFrequencyMode = iota
+	// ACKFrequencyMvfstDraft interoperates with mvfst's legacy draft codepoints:
+	// min_ack_delay=0xff04de1a, ACK_FREQUENCY=0xaf and IMMEDIATE_ACK=0xac.
+	ACKFrequencyMvfstDraft
+)
+
+// ACKFrequencyEvent reports a sender request that was accepted and applied to
+// the application-data ACK state machine.
+type ACKFrequencyEvent struct {
+	ConnectionID         string
+	SequenceNumber       uint64
+	PacketTolerance      uint64
+	RequestedMaxACKDelay time.Duration
+	EffectiveMaxACKDelay time.Duration
+	ReorderingThreshold  uint64
+	ReceivedAt           time.Time
 }
 
 // Config contains all configuration data needed for a QUIC server or client.
@@ -181,6 +342,29 @@ type Config struct {
 	// Enable QUIC Stream Resets with Partial Delivery.
 	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09.
 	EnableStreamResetPartialDelivery bool
+
+	// ACKPolicy selects the receiver-side ACK policy for application data.
+	// The zero value uses quic-go's default behavior.
+	ACKPolicy ACKPolicy
+	// ACKPolicyEventHandler receives receiver policy transitions and ACK
+	// episodes synchronously on the connection event loop.
+	ACKPolicyEventHandler func(ACKPolicyEvent)
+	// PaperV1Mode rejects ACK_FREQUENCY and IMMEDIATE_ACK frames after recording
+	// an ack_frequency_violation event. It never advertises ACK_FREQUENCY support.
+	PaperV1Mode                 bool
+	ACKPolicyFlowID             string
+	ACKPolicySpecSHA256         string
+	ACKPolicyEventSchemaVersion string
+	ProcessStartIdentity        string
+
+	// ACKFrequencyMode enables an explicit ACK_FREQUENCY compatibility profile.
+	ACKFrequencyMode ACKFrequencyMode
+	// MinACKDelay is advertised when ACKFrequencyMode is enabled. A zero value
+	// defaults to 1ms.
+	MinACKDelay time.Duration
+	// ACKFrequencyEventHandler is called synchronously on the connection event
+	// loop after a newer ACK_FREQUENCY request has been applied.
+	ACKFrequencyEventHandler func(ACKFrequencyEvent)
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
 }

@@ -16,6 +16,8 @@ type pacer struct {
 	maxDatagramSize   protocol.ByteCount
 	lastSentTime      monotime.Time
 	adjustedBandwidth func() uint64 // in bytes/s
+	reportedPacket    bool
+	reportedDeadline  bool
 }
 
 func newPacer(getBandwidth func() Bandwidth) *pacer {
@@ -36,6 +38,10 @@ func newPacer(getBandwidth func() Bandwidth) *pacer {
 }
 
 func (p *pacer) SentPacket(sendTime monotime.Time, size protocol.ByteCount) {
+	if !p.reportedPacket {
+		p.reportedPacket = true
+		writePaperV1Runtime(map[string]any{"event": "pacer_packet_consumed", "packet_size": int64(size)})
+	}
 	budget := p.Budget(sendTime)
 	if size >= budget {
 		p.budgetAtLastSent = 0
@@ -102,7 +108,12 @@ func (p *pacer) TimeUntilSend() monotime.Time {
 	if diff%bw > 0 {
 		d++
 	}
-	return p.lastSentTime.Add(max(protocol.MinPacingDelay, time.Duration(d)*time.Nanosecond))
+	deadline := p.lastSentTime.Add(max(protocol.MinPacingDelay, time.Duration(d)*time.Nanosecond))
+	if !p.reportedDeadline {
+		p.reportedDeadline = true
+		writePaperV1Runtime(map[string]any{"event": "pacing_deadline_computed", "pacing_delay_ns": deadline.Sub(p.lastSentTime).Nanoseconds()})
+	}
+	return deadline
 }
 
 func (p *pacer) SetMaxDatagramSize(s protocol.ByteCount) {

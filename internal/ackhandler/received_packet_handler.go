@@ -2,6 +2,7 @@ package ackhandler
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/quic-go/quic-go/internal/monotime"
 	"github.com/quic-go/quic-go/internal/protocol"
@@ -18,12 +19,20 @@ type ReceivedPacketHandler struct {
 }
 
 func NewReceivedPacketHandler(logger utils.Logger) *ReceivedPacketHandler {
+	return NewReceivedPacketHandlerWithPolicy(logger, ACKPolicyDefault, nil)
+}
+
+func NewReceivedPacketHandlerWithPolicy(logger utils.Logger, policy ACKPolicy, rttStats *utils.RTTStats) *ReceivedPacketHandler {
 	return &ReceivedPacketHandler{
 		initialPackets:   newReceivedPacketTracker(),
 		handshakePackets: newReceivedPacketTracker(),
-		appDataPackets:   *newAppDataReceivedPacketTracker(logger),
+		appDataPackets:   *newAppDataReceivedPacketTrackerWithPolicy(logger, policy, rttStats),
 		lowest1RTTPacket: protocol.InvalidPacketNumber,
 	}
+}
+
+func (h *ReceivedPacketHandler) SetACKPolicyEventHandler(handler ACKPolicyEventHandler) {
+	h.appDataPackets.setEventHandler(handler)
 }
 
 func (h *ReceivedPacketHandler) ReceivedPacket(
@@ -60,6 +69,28 @@ func (h *ReceivedPacketHandler) ReceivedPacket(
 
 func (h *ReceivedPacketHandler) IgnorePacketsBelow(pn protocol.PacketNumber) {
 	h.appDataPackets.IgnoreBelow(pn)
+}
+
+// ApplyAckFrequency applies a newer sender request to the application-data ACK
+// state machine. It returns false for duplicate or stale sequence numbers.
+func (h *ReceivedPacketHandler) ApplyAckFrequency(
+	sequenceNumber uint64,
+	packetTolerance uint64,
+	maxAckDelay time.Duration,
+	reorderingThreshold protocol.PacketNumber,
+) bool {
+	return h.appDataPackets.applyAckFrequency(
+		sequenceNumber,
+		packetTolerance,
+		maxAckDelay,
+		reorderingThreshold,
+	)
+}
+
+// QueueImmediateACK cancels the delayed-ACK alarm and requests an ACK in the
+// next packet that can carry one.
+func (h *ReceivedPacketHandler) QueueImmediateACK() {
+	h.appDataPackets.queueImmediateACK()
 }
 
 func (h *ReceivedPacketHandler) DropPackets(encLevel protocol.EncryptionLevel) {
