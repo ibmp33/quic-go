@@ -29,6 +29,31 @@ func validateConfig(config *Config) error {
 	if config.ACKPolicy > ACKPolicyChromium {
 		return fmt.Errorf("invalid ACK policy: %d", config.ACKPolicy)
 	}
+	if config.ACKFrequencyMode > ACKFrequencyMvfstDraft {
+		return fmt.Errorf("invalid ACK_FREQUENCY mode: %d", config.ACKFrequencyMode)
+	}
+	if config.ACKFrequencyMode == ACKFrequencyDisabled && config.MinACKDelay != 0 {
+		return fmt.Errorf("MinACKDelay requires ACKFrequencyMode to be enabled")
+	}
+	if config.PaperV1Mode && config.ACKFrequencyMode != ACKFrequencyDisabled {
+		return fmt.Errorf("PaperV1Mode requires ACK_FREQUENCY to be disabled")
+	}
+	if config.PaperV1Mode && (config.ACKPolicy != ACKPolicyNeqoLike && config.ACKPolicy != ACKPolicyChromeLike) {
+		return fmt.Errorf("PaperV1Mode requires neqo-like-ack or chrome-like-ack")
+	}
+	if config.PaperV1Mode && config.ACKPolicySpecSHA256 == "" {
+		return fmt.Errorf("PaperV1Mode requires ACKPolicySpecSHA256")
+	}
+	if config.PaperV1Mode && config.ACKPolicyFlowID == "" {
+		return fmt.Errorf("PaperV1Mode requires ACKPolicyFlowID")
+	}
+	if config.MinACKDelay < 0 || config.MinACKDelay > protocol.MaxAckDelayInclGranularity {
+		return fmt.Errorf(
+			"invalid MinACKDelay: %s (must be between 0 and %s)",
+			config.MinACKDelay,
+			protocol.MaxAckDelayInclGranularity,
+		)
+	}
 	const maxStreams = 1 << 60
 	if config.MaxIncomingStreams > maxStreams {
 		config.MaxIncomingStreams = maxStreams
@@ -107,6 +132,10 @@ func populateConfig(config *Config) *Config {
 	if initialPacketSize == 0 {
 		initialPacketSize = protocol.InitialPacketSize
 	}
+	minACKDelay := config.MinACKDelay
+	if config.ACKFrequencyMode != ACKFrequencyDisabled && minACKDelay == 0 {
+		minACKDelay = time.Millisecond
+	}
 
 	return &Config{
 		GetConfigForClient:               config.GetConfigForClient,
@@ -128,6 +157,15 @@ func populateConfig(config *Config) *Config {
 		EnableStreamResetPartialDelivery: config.EnableStreamResetPartialDelivery,
 		Allow0RTT:                        config.Allow0RTT,
 		ACKPolicy:                        config.ACKPolicy,
+		ACKPolicyEventHandler:            config.ACKPolicyEventHandler,
+		PaperV1Mode:                      config.PaperV1Mode,
+		ACKPolicyFlowID:                  config.ACKPolicyFlowID,
+		ACKPolicySpecSHA256:              config.ACKPolicySpecSHA256,
+		ACKPolicyEventSchemaVersion:      config.ACKPolicyEventSchemaVersion,
+		ProcessStartIdentity:             config.ProcessStartIdentity,
+		ACKFrequencyMode:                 config.ACKFrequencyMode,
+		MinACKDelay:                      minACKDelay,
+		ACKFrequencyEventHandler:         config.ACKFrequencyEventHandler,
 		Tracer:                           config.Tracer,
 	}
 }

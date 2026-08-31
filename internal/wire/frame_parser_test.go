@@ -568,6 +568,20 @@ func TestFrameParserAckFrequencyUnsupported(t *testing.T) {
 	})
 }
 
+func TestFrameParserMvfstImmediateAck(t *testing.T) {
+	parser := NewFrameParser(true, true, true)
+	b := encodeVarInt(uint64(FrameTypeImmediateAckMvfst))
+	frameType, l, err := parser.ParseType(b, protocol.Encryption1RTT)
+	require.NoError(t, err)
+	require.Equal(t, len(b), l)
+	require.Equal(t, FrameTypeImmediateAckMvfst, frameType)
+
+	frame, consumed, err := parser.ParseLessCommonFrame(frameType, b[l:], protocol.Version1)
+	require.NoError(t, err)
+	require.Zero(t, consumed)
+	require.IsType(t, &ImmediateAckFrame{}, frame)
+}
+
 func TestFrameParserInvalidFrameType(t *testing.T) {
 	parser := NewFrameParser(true, true, true)
 

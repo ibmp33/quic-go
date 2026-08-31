@@ -346,6 +346,7 @@ var newConnection = func(
 		RetrySourceConnectionID:   retrySrcConnID,
 		EnableResetStreamAt:       conf.EnableStreamResetPartialDelivery,
 	}
+	configureLocalACKFrequency(params, s.config)
 	if s.config.EnableDatagrams {
 		params.MaxDatagramFrameSize = wire.MaxDatagramSize
 	} else {
@@ -472,6 +473,7 @@ var newClientConnection = func(
 		InitialSourceConnectionID: srcConnID,
 		EnableResetStreamAt:       conf.EnableStreamResetPartialDelivery,
 	}
+	configureLocalACKFrequency(params, s.config)
 	if s.config.EnableDatagrams {
 		params.MaxDatagramFrameSize = wire.MaxDatagramSize
 	} else {
@@ -517,7 +519,7 @@ func (c *Conn) preSetup() {
 	c.frameParser = *wire.NewFrameParser(
 		c.config.EnableDatagrams,
 		c.config.EnableStreamResetPartialDelivery,
-		false, // ACK_FREQUENCY is not supported yet
+		c.config.ACKFrequencyMode != ACKFrequencyDisabled || c.config.PaperV1Mode,
 	)
 	c.rttStats = utils.NewRTTStats()
 	c.connFlowController = newConnectionFlowController(
@@ -558,9 +560,60 @@ func (c *Conn) preSetup() {
 		ackhandler.ACKPolicy(c.config.ACKPolicy),
 		c.rttStats,
 	)
+	if c.config.ACKPolicyEventHandler != nil {
+		policyName, policyVersion := ackPolicyIdentity(c.config.ACKPolicy)
+		c.receivedPacketHandler.SetACKPolicyEventHandler(func(event ackhandler.ACKPolicyEvent) {
+			ranges := make([]ACKPolicyACKRange, 0, len(event.ACKRanges))
+			for _, ackRange := range event.ACKRanges {
+				ranges = append(ranges, ACKPolicyACKRange{Smallest: uint64(ackRange.Smallest), Largest: uint64(ackRange.Largest)})
+			}
+			c.config.ACKPolicyEventHandler(ACKPolicyEvent{
+				SchemaVersion: c.config.ACKPolicyEventSchemaVersion,
+				Event:         event.Event, ConnectionID: c.logID, FlowID: c.config.ACKPolicyFlowID,
+				PolicyName: policyName, PolicyVersion: policyVersion,
+				PolicySpecSHA256: c.config.ACKPolicySpecSHA256,
+				PacketNumber:     uint64(event.PacketNumber), PacketNumberSpace: event.PacketNumberSpace,
+				OldState: event.OldState, NewState: event.NewState,
+				PolicyState:   event.PolicyState,
+				MonotonicTime: event.MonotonicTime, Reason: event.Reason, Trigger: event.Trigger,
+				ACKBatchSize: event.ACKBatchSize, ACKSpacing: event.ACKSpacing,
+				NewlyAcknowledgedPacketCount: event.NewlyAcknowledgedPacketCount,
+				ACKRanges:                    ranges, LargestAcknowledged: uint64(event.LargestAcknowledged),
+				ACKDelay: event.ACKDelay, TimerDeadline: event.TimerDeadline, Threshold: event.Threshold,
+				ReferencePacketNumber:          uint64(event.ReferencePacketNumber),
+				ObservedPacketNumber:           uint64(event.ObservedPacketNumber),
+				TransitionBoundaryPacketNumber: uint64(event.TransitionBoundaryPacketNumber),
+				TransitionSequenceNumber:       event.TransitionSequenceNumber,
+			})
+		})
+		definition := DescribeACKPolicy(c.config.ACKPolicy)
+		c.config.ACKPolicyEventHandler(ACKPolicyEvent{
+			SchemaVersion: c.config.ACKPolicyEventSchemaVersion,
+			Event:         "policy_initialized", ConnectionID: c.logID,
+			FlowID: c.config.ACKPolicyFlowID, PolicyName: policyName,
+			PolicyVersion: policyVersion, PolicySpecSHA256: c.config.ACKPolicySpecSHA256,
+			EffectiveParameters:  definition.Parameters,
+			ProcessStartIdentity: c.config.ProcessStartIdentity,
+			PacketNumberSpace:    "application_data", MonotonicTime: 0,
+			Reason: "connection-receiver-policy-created",
+		})
+	}
 
 	c.datagramQueue = newDatagramQueue(c.scheduleSending, c.logger)
 	c.connState.Version = c.version
+}
+
+func ackPolicyIdentity(policy ACKPolicy) (string, string) {
+	switch policy {
+	case ACKPolicyNeqoLike:
+		return ACKPolicyNeqoLikeName, ACKPolicyNeqoLikeVersion
+	case ACKPolicyChromeLike:
+		return ACKPolicyChromeLikeName, ACKPolicyChromeLikeVersion
+	case ACKPolicyFixed10:
+		return "synthetic-fixed-ack-10", "1.0.0"
+	default:
+		return "synthetic-fixed-ack-2", "1.0.0"
+	}
 }
 
 // run the connection main loop
@@ -1948,10 +2001,106 @@ func (c *Conn) handleFrame(
 		err = c.connIDGenerator.Retire(frame.SequenceNumber, destConnID, rcvTime.Add(3*c.rttStats.PTO(false)))
 	case *wire.HandshakeDoneFrame:
 		err = c.handleHandshakeDoneFrame(rcvTime)
+	case *wire.AckFrequencyFrame:
+		err = c.handleAckFrequencyFrame(frame, encLevel)
+	case *wire.ImmediateAckFrame:
+		err = c.handleImmediateAckFrame(encLevel)
 	default:
 		err = fmt.Errorf("unexpected frame type: %s", reflect.ValueOf(&frame).Elem().Type().Name())
 	}
 	return pathChallenge, err
+}
+
+func configureLocalACKFrequency(params *wire.TransportParameters, config *Config) {
+	if config.ACKFrequencyMode == ACKFrequencyDisabled {
+		return
+	}
+	params.MinAckDelay = &config.MinACKDelay
+	params.UseMvfstAckFrequency = config.ACKFrequencyMode == ACKFrequencyMvfstDraft
+}
+
+func (c *Conn) handleAckFrequencyFrame(
+	frame *wire.AckFrequencyFrame,
+	encLevel protocol.EncryptionLevel,
+) error {
+	if c.config.PaperV1Mode {
+		c.emitPaperV1ACKFrequencyViolation("ACK_FREQUENCY")
+		return &qerr.TransportError{
+			ErrorCode: qerr.ProtocolViolation, FrameType: uint64(wire.FrameTypeAckFrequency),
+			ErrorMessage: "ACK_FREQUENCY is forbidden by receiver-ack-policy-v1.0.0",
+		}
+	}
+	if c.config.ACKFrequencyMode == ACKFrequencyDisabled || encLevel != protocol.Encryption1RTT {
+		return &qerr.TransportError{
+			ErrorCode:    qerr.ProtocolViolation,
+			FrameType:    uint64(wire.FrameTypeAckFrequency),
+			ErrorMessage: "ACK_FREQUENCY received without negotiated support",
+		}
+	}
+	if frame.AckElicitingThreshold == 0 || frame.ReorderingThreshold < 0 {
+		return &qerr.TransportError{
+			ErrorCode:    qerr.FrameEncodingError,
+			FrameType:    uint64(wire.FrameTypeAckFrequency),
+			ErrorMessage: "ACK_FREQUENCY contains an invalid threshold",
+		}
+	}
+	effectiveMaxACKDelay := frame.RequestMaxAckDelay
+	if effectiveMaxACKDelay < c.config.MinACKDelay {
+		effectiveMaxACKDelay = c.config.MinACKDelay
+	}
+	applied := c.receivedPacketHandler.ApplyAckFrequency(
+		frame.SequenceNumber,
+		frame.AckElicitingThreshold,
+		effectiveMaxACKDelay,
+		frame.ReorderingThreshold,
+	)
+	if applied && c.config.ACKFrequencyEventHandler != nil {
+		c.config.ACKFrequencyEventHandler(ACKFrequencyEvent{
+			ConnectionID:         c.logID,
+			SequenceNumber:       frame.SequenceNumber,
+			PacketTolerance:      frame.AckElicitingThreshold,
+			RequestedMaxACKDelay: frame.RequestMaxAckDelay,
+			EffectiveMaxACKDelay: effectiveMaxACKDelay,
+			ReorderingThreshold:  uint64(frame.ReorderingThreshold),
+			ReceivedAt:           time.Now(),
+		})
+	}
+	return nil
+}
+
+func (c *Conn) handleImmediateAckFrame(encLevel protocol.EncryptionLevel) error {
+	if c.config.PaperV1Mode {
+		c.emitPaperV1ACKFrequencyViolation("IMMEDIATE_ACK")
+		return &qerr.TransportError{
+			ErrorCode: qerr.ProtocolViolation, FrameType: uint64(wire.FrameTypeImmediateAckMvfst),
+			ErrorMessage: "IMMEDIATE_ACK is forbidden by receiver-ack-policy-v1.0.0",
+		}
+	}
+	if c.config.ACKFrequencyMode == ACKFrequencyDisabled || encLevel != protocol.Encryption1RTT {
+		return &qerr.TransportError{
+			ErrorCode:    qerr.ProtocolViolation,
+			FrameType:    uint64(wire.FrameTypeImmediateAckMvfst),
+			ErrorMessage: "IMMEDIATE_ACK received without negotiated support",
+		}
+	}
+	c.receivedPacketHandler.QueueImmediateACK()
+	return nil
+}
+
+func (c *Conn) emitPaperV1ACKFrequencyViolation(frameName string) {
+	if c.config.ACKPolicyEventHandler == nil {
+		return
+	}
+	policyName, policyVersion := ackPolicyIdentity(c.config.ACKPolicy)
+	c.config.ACKPolicyEventHandler(ACKPolicyEvent{
+		SchemaVersion: c.config.ACKPolicyEventSchemaVersion,
+		Event:         "ack_frequency_violation", ConnectionID: c.logID,
+		FlowID: c.config.ACKPolicyFlowID, PolicyName: policyName,
+		PolicyVersion: policyVersion, PolicySpecSHA256: c.config.ACKPolicySpecSHA256,
+		PacketNumberSpace: "application_data",
+		MonotonicTime:     max(0, monotime.Now().Sub(c.creationTime)),
+		Reason:            frameName + " received while PaperV1Mode forbids negotiated override",
+	})
 }
 
 // handlePacket is called by the server with a new packet

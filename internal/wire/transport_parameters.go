@@ -54,6 +54,8 @@ const (
 	legacyResetStreamAtParameterID transportParameterID = 0x17f7586d2cb571
 	// https://datatracker.ietf.org/doc/draft-ietf-quic-ack-frequency/11/
 	minAckDelayParameterID transportParameterID = 0xff04de1b
+	// Legacy draft codepoint used by mvfst.
+	minAckDelayMvfstParameterID transportParameterID = 0xff04de1a
 )
 
 // PreferredAddress is the value encoding in the preferred_address transport parameter
@@ -94,6 +96,7 @@ type TransportParameters struct {
 	MaxDatagramFrameSize protocol.ByteCount // RFC 9221
 	EnableResetStreamAt  bool               // https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/09/
 	MinAckDelay          *time.Duration
+	UseMvfstAckFrequency bool
 }
 
 // Unmarshal the transport parameters
@@ -150,7 +153,8 @@ func (p *TransportParameters) unmarshal(b []byte, sentBy protocol.Perspective, f
 			maxDatagramFrameSizeParameterID,
 			ackDelayExponentParameterID,
 			activeConnectionIDLimitParameterID,
-			minAckDelayParameterID:
+			minAckDelayParameterID,
+			minAckDelayMvfstParameterID:
 			if err := p.readNumericTransportParameter(b, paramID, int(paramLen)); err != nil {
 				return err
 			}
@@ -342,7 +346,7 @@ func (p *TransportParameters) readNumericTransportParameter(b []byte, paramID tr
 		p.ActiveConnectionIDLimit = val
 	case maxDatagramFrameSizeParameterID:
 		p.MaxDatagramFrameSize = protocol.ByteCount(val)
-	case minAckDelayParameterID:
+	case minAckDelayParameterID, minAckDelayMvfstParameterID:
 		mad := time.Duration(val) * time.Microsecond
 		if mad < 0 {
 			mad = math.MaxInt64
@@ -460,7 +464,11 @@ func (p *TransportParameters) Marshal(pers protocol.Perspective) []byte {
 		b = quicvarint.Append(b, 0)
 	}
 	if p.MinAckDelay != nil {
-		b = p.marshalVarintParam(b, minAckDelayParameterID, uint64(*p.MinAckDelay/time.Microsecond))
+		paramID := minAckDelayParameterID
+		if p.UseMvfstAckFrequency {
+			paramID = minAckDelayMvfstParameterID
+		}
+		b = p.marshalVarintParam(b, paramID, uint64(*p.MinAckDelay/time.Microsecond))
 	}
 
 	if pers == protocol.PerspectiveClient && len(AdditionalTransportParametersClient) > 0 {

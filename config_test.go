@@ -75,6 +75,44 @@ func TestValidateACKPolicy(t *testing.T) {
 	require.Error(t, validateConfig(&Config{ACKPolicy: ACKPolicyChromium + 1}))
 }
 
+func TestValidateACKFrequencyConfig(t *testing.T) {
+	require.NoError(t, validateConfig(&Config{ACKFrequencyMode: ACKFrequencyDisabled}))
+	require.NoError(t, validateConfig(&Config{
+		ACKFrequencyMode: ACKFrequencyMvfstDraft,
+		MinACKDelay:      time.Millisecond,
+	}))
+	require.Error(t, validateConfig(&Config{ACKFrequencyMode: ACKFrequencyMvfstDraft + 1}))
+	require.Error(t, validateConfig(&Config{MinACKDelay: time.Millisecond}))
+	require.Error(t, validateConfig(&Config{
+		ACKFrequencyMode: ACKFrequencyMvfstDraft,
+		MinACKDelay:      -time.Millisecond,
+	}))
+	require.Equal(t, time.Millisecond, populateConfig(&Config{
+		ACKFrequencyMode: ACKFrequencyMvfstDraft,
+	}).MinACKDelay)
+}
+
+func TestValidatePaperV1Config(t *testing.T) {
+	valid := &Config{
+		ACKPolicy: ACKPolicyNeqoLike, PaperV1Mode: true,
+		ACKPolicyFlowID: "flow_a", ACKPolicySpecSHA256: "sha256",
+	}
+	require.NoError(t, validateConfig(valid))
+	require.Error(t, validateConfig(&Config{
+		ACKPolicy: ACKPolicyFixed10, PaperV1Mode: true,
+		ACKPolicyFlowID: "flow_a", ACKPolicySpecSHA256: "sha256",
+	}))
+	require.Error(t, validateConfig(&Config{
+		ACKPolicy: ACKPolicyChromeLike, PaperV1Mode: true,
+		ACKPolicyFlowID: "flow_a", ACKPolicySpecSHA256: "sha256",
+		ACKFrequencyMode: ACKFrequencyMvfstDraft,
+	}))
+	require.Error(t, validateConfig(&Config{
+		ACKPolicy: ACKPolicyChromeLike, PaperV1Mode: true,
+		ACKPolicyFlowID: "flow_a",
+	}))
+}
+
 func TestConfigHandshakeIdleTimeout(t *testing.T) {
 	c := &Config{HandshakeIdleTimeout: time.Second * 11 / 2}
 	require.Equal(t, 11*time.Second, c.handshakeTimeout())
@@ -94,7 +132,7 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 		}
 
 		switch fn := typ.Field(i).Name; fn {
-		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "Tracer":
+		case "GetConfigForClient", "RequireAddressValidation", "GetLogWriter", "AllowConnectionWindowIncrease", "Tracer", "ACKFrequencyEventHandler", "ACKPolicyEventHandler":
 			// Can't compare functions.
 		case "Versions":
 			f.Set(reflect.ValueOf([]Version{1, 2, 3}))
@@ -138,6 +176,14 @@ func configWithNonZeroNonFunctionFields(t *testing.T) *Config {
 			f.Set(reflect.ValueOf(true))
 		case "ACKPolicy":
 			f.Set(reflect.ValueOf(ACKPolicyChromium))
+		case "PaperV1Mode":
+			f.Set(reflect.ValueOf(true))
+		case "ACKPolicyFlowID", "ACKPolicySpecSHA256", "ACKPolicyEventSchemaVersion", "ProcessStartIdentity":
+			f.Set(reflect.ValueOf("paper-v1-test-value"))
+		case "ACKFrequencyMode":
+			f.Set(reflect.ValueOf(ACKFrequencyMvfstDraft))
+		case "MinACKDelay":
+			f.Set(reflect.ValueOf(time.Millisecond))
 		default:
 			t.Fatalf("all fields must be accounted for, but saw unknown field %q", fn)
 		}
