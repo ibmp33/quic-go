@@ -291,6 +291,7 @@ func main() {
 	fmt.Printf("URL: %s\n", *urlStr)
 	fmt.Printf("Status: %s\n", resp.Status)
 	fmt.Printf("Proto: %s\n", resp.Proto)
+	fmt.Printf("Content-Length: %d\n", resp.ContentLength)
 	fmt.Printf("ACK policy: %s\n", *ackPolicyName)
 	fmt.Printf("Local UDP port: %d\n", *localPort)
 	fmt.Printf("Request start Unix ns: %d\n", start.UnixNano())
