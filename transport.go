@@ -82,6 +82,12 @@ type Transport struct {
 	// have the same length.
 	ConnectionIDGenerator ConnectionIDGenerator
 
+	// InitialDestinationConnectionIDLength fixes the destination Connection ID
+	// length used in client Initial packets. It must be between 8 and 20. If
+	// unset, the RFC-permitted randomized 8..20 byte behavior is preserved.
+	// This is exposed for reproducible interop captures with older dissectors.
+	InitialDestinationConnectionIDLength int
+
 	// The StatelessResetKey is used to generate stateless reset tokens.
 	// If no key is configured, sending of stateless resets is disabled.
 	// It is highly recommended to configure a stateless reset key, as stateless resets
@@ -278,7 +284,15 @@ func (t *Transport) doDial(
 	if err != nil {
 		return nil, err
 	}
-	destConnID, err := generateConnectionIDForInitial()
+	var destConnID protocol.ConnectionID
+	if t.InitialDestinationConnectionIDLength != 0 {
+		if t.InitialDestinationConnectionIDLength < 8 || t.InitialDestinationConnectionIDLength > 20 {
+			return nil, fmt.Errorf("initial destination connection ID length must be between 8 and 20")
+		}
+		destConnID, err = protocol.GenerateConnectionID(t.InitialDestinationConnectionIDLength)
+	} else {
+		destConnID, err = generateConnectionIDForInitial()
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -52,6 +52,7 @@ func main() {
 	ackFrequencyModeName := flag.String("ack-frequency-mode", "disabled", "ACK_FREQUENCY compatibility: disabled or mvfst-draft")
 	minACKDelay := flag.Duration("min-ack-delay", time.Millisecond, "min_ack_delay advertised with an enabled ACK_FREQUENCY mode")
 	localPort := flag.Int("local-port", 0, "optional fixed local UDP port")
+	initialDCIDLength := flag.Int("initial-dcid-length", 0, "fixed client Initial destination CID length (8..20; required with -paper-v1)")
 	startAtUnixNS := flag.Int64("start-at-unix-ns", 0, "wait until this Unix timestamp before starting the request")
 	startTimeout := flag.Duration("start-timeout", 30*time.Second, "maximum time to wait for -start-at-unix-ns")
 	metricsPath := flag.String("metrics", "", "CSV path for cumulative received bytes (required)")
@@ -106,6 +107,12 @@ func main() {
 	}
 	if *localPort < 0 || *localPort > 65535 {
 		log.Fatal("-local-port must be between 0 and 65535")
+	}
+	if *initialDCIDLength != 0 && (*initialDCIDLength < 8 || *initialDCIDLength > 20) {
+		log.Fatal("-initial-dcid-length must be between 8 and 20")
+	}
+	if *paperV1 && *initialDCIDLength == 0 {
+		log.Fatal("-paper-v1 requires an explicit -initial-dcid-length for reproducible wire validation")
 	}
 	if *readBuffer <= 0 {
 		log.Fatal("-read-buffer must be greater than 0")
@@ -198,18 +205,19 @@ func main() {
 
 	if protocol == protocolRaw {
 		if err := runRawClient(rawClientConfig{
-			addr:          *serverAddr,
-			tlsConf:       tlsConf,
-			quicConf:      quicConf,
-			localPort:     *localPort,
-			duration:      *duration,
-			maxBytes:      *maxBytes,
-			readBuffer:    *readBuffer,
-			metricsPath:   *metricsPath,
-			outPath:       *outPath,
-			ackPolicyName: *ackPolicyName,
-			qlogDir:       *qlogDir,
-			startAtUnixNS: *startAtUnixNS,
+			addr:              *serverAddr,
+			tlsConf:           tlsConf,
+			quicConf:          quicConf,
+			localPort:         *localPort,
+			duration:          *duration,
+			maxBytes:          *maxBytes,
+			readBuffer:        *readBuffer,
+			metricsPath:       *metricsPath,
+			outPath:           *outPath,
+			ackPolicyName:     *ackPolicyName,
+			qlogDir:           *qlogDir,
+			startAtUnixNS:     *startAtUnixNS,
+			initialDCIDLength: *initialDCIDLength,
 		}); err != nil {
 			log.Fatalf("raw QUIC transfer from %s failed: %v", *serverAddr, err)
 		}
@@ -226,7 +234,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("bind local UDP port %d: %v", *localPort, err)
 		}
-		quicTransport = &quic.Transport{Conn: udpConn}
+		quicTransport = &quic.Transport{Conn: udpConn, InitialDestinationConnectionIDLength: *initialDCIDLength}
 		rt.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			remoteAddr, err := net.ResolveUDPAddr("udp", addr)
 			if err != nil {
@@ -295,6 +303,7 @@ func main() {
 	fmt.Printf("Content-Length: %d\n", resp.ContentLength)
 	fmt.Printf("ACK policy: %s\n", *ackPolicyName)
 	fmt.Printf("Local UDP port: %d\n", *localPort)
+	fmt.Printf("Initial DCID length: %d\n", *initialDCIDLength)
 	fmt.Printf("Request start Unix ns: %d\n", start.UnixNano())
 	if *startAtUnixNS > 0 {
 		fmt.Printf("Request start error us: %.3f\n", float64(start.UnixNano()-*startAtUnixNS)/1e3)
@@ -313,18 +322,19 @@ func main() {
 }
 
 type rawClientConfig struct {
-	addr          string
-	tlsConf       *tls.Config
-	quicConf      *quic.Config
-	localPort     int
-	duration      time.Duration
-	maxBytes      uint64
-	readBuffer    int
-	metricsPath   string
-	outPath       string
-	ackPolicyName string
-	qlogDir       string
-	startAtUnixNS int64
+	addr              string
+	tlsConf           *tls.Config
+	quicConf          *quic.Config
+	localPort         int
+	duration          time.Duration
+	maxBytes          uint64
+	readBuffer        int
+	metricsPath       string
+	outPath           string
+	ackPolicyName     string
+	qlogDir           string
+	startAtUnixNS     int64
+	initialDCIDLength int
 }
 
 func runRawClient(config rawClientConfig) error {
@@ -367,7 +377,7 @@ func runRawClient(config rawClientConfig) error {
 		if listenErr != nil {
 			return fmt.Errorf("bind local UDP port %d: %w", config.localPort, listenErr)
 		}
-		quicTransport = &quic.Transport{Conn: udpConn}
+		quicTransport = &quic.Transport{Conn: udpConn, InitialDestinationConnectionIDLength: config.initialDCIDLength}
 		defer quicTransport.Close()
 		remoteAddr, resolveErr := net.ResolveUDPAddr("udp", config.addr)
 		if resolveErr != nil {
