@@ -89,7 +89,7 @@ func main() {
 		fmt.Printf("commit: %s\n", gitCommit)
 		fmt.Printf("build_time: %s\n", buildTime)
 		fmt.Println("congestion_control: cubic")
-		fmt.Println("initial_congestion_window_packets: 10")
+		fmt.Println("initial_congestion_window_packets: 32")
 		return
 	}
 
